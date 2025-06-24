@@ -1,16 +1,18 @@
-# oof
+import os
+import asyncio
+import time
 from datetime import datetime as dt
-import os, asyncio, pyrogram, psutil, platform
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton , Message
+from pyrogram.errors import FloodWait, RPCError
 from bot import (
     APP_ID,
     API_HASH,
-    AUTH_USERS,
-    DOWNLOAD_LOCATION,
-    LOGGER,
     TG_BOT_TOKEN,
+    USER_SESSION,
+    DOWNLOAD_LOCATION,
     BOT_USERNAME,
-    SESSION_NAME,
-    
+    LOGGER,
     data,
     app,
     crf,
@@ -18,38 +20,32 @@ from bot import (
     audio_b,
     preset,
     codec,
-    watermark 
+    watermark,
+    AUTH_USERS
 )
-from bot.helper_funcs.utils import add_task, on_task_complete, sysinfo
-from pyrogram import Client, filters
-from pyrogram.handlers import MessageHandler, CallbackQueryHandler
-from pyrogram.types import Message
-from psutil import disk_usage, cpu_percent, virtual_memory, Process as psprocess
-
-from bot.plugins.incoming_message_fn import (
-    incoming_start_message_f,
-    incoming_compress_message_f,
-    incoming_cancel_message_f
-)
-
-from bot.plugins.status_message_fn import (
-    eval_message_f,
-    exec_message_f,
-    upload_log_file
-)
-
 from bot.commands import Command
-from bot.plugins.call_back_button_handler import button
-sudo_users = "5179011789" 
-crf.append("28")
+from bot.helper_funcs.utils import add_task, sysinfo, TimeFormatter
+import pyrogram.utils
+
+pyrogram.utils.MIN_CHAT_ID = -999999999999
+pyrogram.utils.MIN_CHANNEL_ID = -100999999999999
+
+# Default settings
+crf.append("23")
 codec.append("libx265")
 resolution.append("1280x720")
-preset.append("veryfast")
-audio_b.append("40k")
-# 🤣
-
+preset.append("medium")
+audio_b.append("96k")
 
 uptime = dt.now()
+user_client = None
+MAX_WORKERS = 2  # Number of parallel tasks
+
+def safe_extract_args(text: str) -> str:
+    try:
+        return text.split(" ", maxsplit=1)[1]
+    except IndexError:
+        return ""
 
 def ts(milliseconds: int) -> str:
     seconds, milliseconds = divmod(int(milliseconds), 1000)
@@ -57,171 +53,270 @@ def ts(milliseconds: int) -> str:
     hours, minutes = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
     tmp = (
-        ((str(days) + "d, ") if days else "")
-        + ((str(hours) + "h, ") if hours else "")
-        + ((str(minutes) + "m, ") if minutes else "")
-        + ((str(seconds) + "s, ") if seconds else "")
-        + ((str(milliseconds) + "ms, ") if milliseconds else "")
+        ((str(days) + "d, ") if days else "") +
+        ((str(hours) + "h, ") if hours else "") +
+        ((str(minutes) + "m, ") if minutes else "") +
+        ((str(seconds) + "s, ") if seconds else "") +
+        ((str(milliseconds) + "ms, ") if milliseconds else "")
     )
     return tmp[:-2]
 
-
+async def is_admin(message):
+    if message.from_user.id in AUTH_USERS:
+        return True
+    await message.reply("🚫 You are not authorized to use this command.")
+    return False
 if __name__ == "__main__" :
     # create download directory, if not exist
     if not os.path.isdir(DOWNLOAD_LOCATION):
         os.makedirs(DOWNLOAD_LOCATION)
         
-    # STATUS ADMIN Command
+# ===================== COMMAND HANDLERS =====================
 
-    # START command
-    incoming_start_message_handler = MessageHandler(
-        incoming_start_message_f,
-        filters=filters.command(["start", f"start@{BOT_USERNAME}"])
-    )
-    app.add_handler(incoming_start_message_handler)
-    
-    @app.on_message(filters.incoming & filters.command(["crf", f"crf@{BOT_USERNAME}"]))
-    async def changecrf(app, message):
-        if message.from_user.id in AUTH_USERS:
-            cr = message.text.split(" ", maxsplit=1)[1]
-            OUT = f"<blockquote>I will be using : {cr} crf</blockquote>"
-            crf.insert(0, f"{cr}")
-            await message.reply_text(OUT)
-        else:
-            await message.reply_text("<blockquote>Aᴅᴍɪɴ Oɴʟʏ 🔒</blockquote>")
-            
+    @app.on_message(filters.command([Command.START, f"{Command.START}@{BOT_USERNAME}"]))
+    async def start_command(_, message):
+        try:
+            await message.reply_text(
+                f"🤖 **Welcome to {BOT_USERNAME}**\n\n"
+                "I can compress videos and handle file conversions.\n\n"
+                f"Use /{Command.HELP} to see available commands."
+            )
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await start_command(_, message)
+        except Exception as e:
+            LOGGER.error(f"Start error: {e}")
 
-    @app.on_message(filters.incoming & filters.command(["resolution", f"resolution@{BOT_USERNAME}"]))
-    async def changer(app, message):
-        if message.from_user.id in AUTH_USERS:
-            r = message.text.split(" ", maxsplit=1)[1]
-            OUT = f"<blockquote>I will be using : {r} </blockquote>"
-            resolution.insert(0, f"{r}")
-            await message.reply_text(OUT)
-        else:
-            await message.reply_text("<blockquote>Aᴅᴍɪɴ Oɴʟʏ 🔒</blockquote>")
+    @app.on_message(filters.command([Command.HELP, f"{Command.HELP}@{BOT_USERNAME}"]))
+    async def help_command(_, message):
+        help_text = (
+            "📝 **Available Commands:**\n\n"
+            f"/{Command.START} - Start the bot\n"
+            f"/{Command.HELP} - Show this help\n"
+            f"/{Command.COMPRESS} - Compress replied video\n"
+            f"/{Command.CANCEL} - Cancel current operation\n"
+            f"/{Command.STATUS} - Show current status\n"
+            f"/{Command.EXEC} - Execute shell command (admin)\n"
+            f"/{Command.UPLOAD_LOG_FILE} - Get log file\n\n"
+            "**Settings Commands:**\n"
+            "/crf [value] - Set CRF value\n"
+            "/resolution [value] - Set resolution\n"
+            "/preset [value] - Set preset\n"
+            "/codec [value] - Set codec\n"
+            "/audio [value] - Set audio bitrate\n"
+            "/watermark [text] - Set watermark\n"
+            "/settings - Show current settings"
+        )
+        try:
+            await message.reply_text(help_text)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await help_command(_, message)
 
-               
-    @app.on_message(filters.incoming & filters.command(["preset", f"preset@{BOT_USERNAME}"]))
-    async def changepr(app, message):
-        if message.from_user.id in AUTH_USERS:
-            pop = message.text.split(" ", maxsplit=1)[1]
-            OUT = f"<blockquote>I will be using : {pop} preset</blockquote>"
-            preset.insert(0, f"{pop}")
-            await message.reply_text(OUT)
-        else:
-            await message.reply_text("<blockquote>Aᴅᴍɪɴ Oɴʟʏ 🔒</blockquote>")
+    @app.on_message(filters.command(["crf", f"crf@{BOT_USERNAME}"]))
+    async def change_crf(_, message):
+        try:
+            val = safe_extract_args(message.text)
+            if not val:
+                return await message.reply_text("Please provide CRF value.\nExample: /crf 23")
+            crf[0] = val
+            await message.reply_text(f"✅ CRF set to: {val}")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await change_crf(_, message)
 
-            
-    @app.on_message(filters.incoming & filters.command(["codec", f"codec@{BOT_USERNAME}"]))
-    async def changecode(app, message):
-        if message.from_user.id in AUTH_USERS:
-            col = message.text.split(" ", maxsplit=1)[1]
-            OUT = f"<blockquote>I will be using : {col} codec</blockquote>"
-            codec.insert(0, f"{col}")
-            await message.reply_text(OUT)
-        else:
-            await message.reply_text("<blockquote>Aᴅᴍɪɴ Oɴʟʏ 🔒</blockquote>")
-             
-    @app.on_message(filters.incoming & filters.command(["audio", f"audio@{BOT_USERNAME}"]))
-    async def changea(app, message):
-        if message.from_user.id in AUTH_USERS:
-            aud = message.text.split(" ", maxsplit=1)[1]
-            OUT = f"<blockquote>I will be using : {aud} audio</blockquote>"
-            audio_b.insert(0, f"{aud}")
-            await message.reply_text(OUT)
-        else:
-            await message.reply_text("<blockquote>Aᴅᴍɪɴ Oɴʟʏ 🔒</blockquote>")
-            
-        
-    @app.on_message(filters.incoming & filters.command(["compress", f"compress@{BOT_USERNAME}"]))
-    async def help_message(app, message):
-        if message.chat.id not in AUTH_USERS:
-            return await message.reply_text("<blockquote>Yᴏᴜ Aʀᴇ Nᴏᴛ Aᴜᴛʜᴏʀɪꜱᴇᴅ Tᴏ Uꜱᴇ Tʜɪꜱ Bᴏᴛ Cᴏɴᴛᴀᴄᴛ @Krishna99887722</blockquote>")
-        query = await message.reply_text("Aᴅᴅᴇᴅ Tᴏ Qᴜᴇᴜᴇ ⏰...\nPʟᴇᴀꜱᴇ ʙᴇ Pᴀᴛɪᴇɴᴛ, Cᴏᴍᴘʀᴇꜱꜱ ᴡɪʟʟ Sᴛᴀʀᴛ Sᴏᴏɴ", quote=True)
-        data.append(message.reply_to_message)
-        if len(data) == 1:
-         await query.delete()   
-         await add_task(message.reply_to_message)     
- 
-    @app.on_message(filters.incoming & filters.command(["restart", f"restart@{BOT_USERNAME}"]))
-    async def restarter(app, message):
-        if message.from_user.id in AUTH_USERS:
-            await message.reply_text("Rᴇꜱᴛᴀʀᴛɪɴɢ...♻️")
-            quit(1)
-        else:
-            await message.reply_text("<blockquote>Aᴅᴍɪɴ Oɴʟʏ 🔒</blockquote>")
-            
-    @app.on_message(filters.incoming & filters.command(["clear", f"clear@{BOT_USERNAME}"]))
-    async def restarter(app, message):
-        data.clear()
-        if message.chat.id not in AUTH_USERS:
-            return await message.reply_text("<blockquote>Yᴏᴜ Aʀᴇ Nᴏᴛ Aᴜᴛʜᴏʀɪꜱᴇᴅ Tᴏ Uꜱᴇ Tʜɪꜱ Bᴏᴛ Cᴏɴᴛᴀᴄᴛ @Krishna99887722</blockquote>")
-        query = await message.reply_text("<blockquote>Sᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ Cʟᴇᴀʀᴇᴅ Qᴜᴇᴜᴇ...📚</blockquote>")
-      
-        
-    @app.on_message(filters.incoming & (filters.video | filters.document))
-    async def help_message(app, message):
-        if message.chat.id not in AUTH_USERS:
-            return await message.reply_text("<blockquote>Yᴏᴜ Aʀᴇ Nᴏᴛ Aᴜᴛʜᴏʀɪꜱᴇᴅ Tᴏ Uꜱᴇ Tʜɪꜱ Bᴏᴛ Cᴏɴᴛᴀᴄᴛ @Krishna99887722</blockquote>")
-        query = await message.reply_text("Aᴅᴅᴇᴅ Tᴏ Qᴜᴇᴜᴇ ⏰...\nPʟᴇᴀꜱᴇ ʙᴇ Pᴀᴛɪᴇɴᴛ, Cᴏᴍᴘʀᴇꜱꜱ ᴡɪʟʟ Sᴛᴀʀᴛ Sᴏᴏɴ", quote=True)
-        data.append(message)
-        if len(data) == 1:
-         await query.delete()   
-         await add_task(message)
-            
+    @app.on_message(filters.command(["resolution", f"resolution@{BOT_USERNAME}"]))
+    async def change_resolution(_, message):
+        try:
+            val = safe_extract_args(message.text)
+            if not val:
+                return await message.reply_text("Provide resolution. Ex: /resolution 1920x1080")
+            resolution[0] = val
+            await message.reply_text(f"✅ Resolution set to: {val}")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await change_resolution(_, message)
 
-    @app.on_message(filters.incoming & filters.command(["settings", f"settings@{BOT_USERNAME}"]))
-    async def settings(app, message):
-        if message.from_user.id in AUTH_USERS:
-            await message.reply_text(f"<b>Tʜᴇ Cᴜʀʀᴇɴᴛ Sᴇᴛᴛɪɴɢꜱ ᴡɪʟʟ ʙᴇ Aᴅᴅᴇᴅ Yᴏᴜʀ Vɪᴅᴇᴏ Fɪʟᴇ ⚙️:</b>\n<blockquote><b>➥ Codec</b> : {codec[0]} \n<b>➥ Crf</b> : {crf[0]} \n<b>➥ Resolution</b> : {resolution[0]} \n<b>➥ Preset</b> : {preset[0]} \n<b>➥ Audio Bitrates</b> : {audio_b[0]}</blockquote>\n<b>🥇 Tʜᴇ Aʙɪʟɪᴛʏ ᴛᴏ Cʜᴀɴɢᴇ Sᴇᴛᴛɪɴɢꜱ ɪꜱ Oɴʟʏ ꜰᴏʀ Aᴅᴍɪɴ</b>")
-        else:
-            await message.reply_text("<blockquote>Aᴅᴍɪɴ Oɴʟʏ 🔒</blockquote>")
-            
-    @app.on_message(filters.incoming & filters.command(["sysinfo", f"sysinfo@{BOT_USERNAME}"]))
-    async def help_message(app, message):
-        if message.from_user.id in AUTH_USERS:
-            await sysinfo(message)
-        else:
-            await message.reply_text("<blockquote>Aᴅᴍɪɴ Oɴʟʏ 🔒</blockquote>")
-        
-    @app.on_message(filters.incoming & filters.command(["cancel", f"cancel@{BOT_USERNAME}"]))
-    async def help_message(app, message):
-        await incoming_cancel_message_f(app, message)
-        
-    @app.on_message(filters.incoming & filters.command(["exec", f"exec@{BOT_USERNAME}"]))
-    async def help_message(app, message):
-        await exec_message_f(app, message)
-        
-    @app.on_message(filters.incoming & filters.command(["eval", f"eval@{BOT_USERNAME}"]))
-    async def help_message(app, message):
-        await eval_message_f(app, message)
-        
-    @app.on_message(filters.incoming & filters.command(["stop", f"stop@{BOT_USERNAME}"]))
-    async def help_message(app, message):
-        await on_task_complete()    
-   
-    @app.on_message(filters.incoming & filters.command(["help", f"help@{BOT_USERNAME}"]))
-    async def help_message(app, message):
-        await message.reply_text("Hɪ, ɪ ᴀᴍ <b>Video Encoder bot</b>\n<blockquote>➥ Sᴇɴᴅ ᴍᴇ Yᴏᴜʀ Tᴇʟᴇɢʀᴀᴍ Fɪʟᴇꜱ\n➥ I ᴡɪʟʟ Eɴᴄᴏᴅᴇ ᴛʜᴇᴍ Oɴᴇ ʙʏ Oɴᴇ Aꜱ ɪ Hᴀᴠᴇ <b>Queue Feature</b>\n➥ Jᴜꜱᴛ Sᴇɴᴅ ᴍᴇ ᴛʜᴇ Jᴘɢ/Pɪᴄ ᴀɴᴅ Iᴛ Wɪʟʟ ʙᴇ Sᴇᴛ ᴀꜱ Yᴏᴜʀ Cᴜꜱᴛᴏᴍ Tʜᴜᴍʙɴᴀɪʟ \n➥ Fᴏʀ FFᴍᴘᴇɢ Lᴏᴠᴇʀꜱ - U ᴄᴀɴ Cʜᴀɴɢᴇ ᴄʀꜰ Bʏ /eval crf.insert(0, 'crf value')</blockquote> \n<b>Maintained By : @Krishna99887722", quote=True)
-        
-    @app.on_message(filters.incoming & filters.command(["log", f"log@{BOT_USERNAME}"]))
-    async def help_message(app, message):
-        await upload_log_file(app, message)
-    @app.on_message(filters.incoming & filters.command(["ping", f"ping@{BOT_USERNAME}"]))
-    async def up(app, message):
-      stt = dt.now()
-      ed = dt.now()
-      v = ts(int((ed - uptime).seconds) * 1000)
-      u = f"<blockquote>Bᴏᴛ ᴜᴘᴛɪᴍᴇ = {v} 🚀"
-      ms = (ed - stt).microseconds / 1000
-      p = f"Pɪɴɢ = {ms}ms 🌋</blockquote>"
-      await message.reply_text(u + "\n" + p)
+    @app.on_message(filters.command(["preset", f"preset@{BOT_USERNAME}"]))
+    async def change_preset(_, message):
+        try:
+            val = safe_extract_args(message.text)
+            if not val:
+                return await message.reply_text("Provide preset. Ex: /preset fast")
+            preset[0] = val
+            await message.reply_text(f"✅ Preset set to: {val}")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await change_preset(_, message)
 
-    call_back_button_handler = CallbackQueryHandler(
-        button
-    )
-    app.add_handler(call_back_button_handler)
+    @app.on_message(filters.command(["codec", f"codec@{BOT_USERNAME}"]))
+    async def change_codec(_, message):
+        try:
+            val = safe_extract_args(message.text)
+            if not val:
+                return await message.reply_text("Provide codec. Ex: /codec libx265")
+            codec[0] = val
+            await message.reply_text(f"✅ Codec set to: {val}")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await change_codec(_, message)
 
-    # run the APPlication
+    @app.on_message(filters.command(["audio", f"audio@{BOT_USERNAME}"]))
+    async def change_audio(_, message):
+        try:
+            val = safe_extract_args(message.text)
+            if not val:
+                return await message.reply_text("Provide audio bitrate. Ex: /audio 128k")
+            audio_b[0] = val
+            await message.reply_text(f"✅ Audio bitrate set to: {val}")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await change_audio(_, message)
+
+    @app.on_message(filters.command(["watermark", f"watermark@{BOT_USERNAME}"]))
+    async def change_watermark(_, message):
+        try:
+            val = safe_extract_args(message.text)
+            if not val:
+                return await message.reply_text("Ex: /watermark Encoded by MyBot")
+            wm = (
+                f"-vf drawtext=fontfile=font.ttf:fontsize=25:fontcolor=white:bordercolor=black@0.50:"
+                f"x=w-tw-10:y=10:box=1:boxcolor=black@0.5:boxborderw=6:text='{val}'"
+            )
+            watermark[0] = wm
+            await message.reply_text(f"✅ Watermark set to: {val}")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await change_watermark(_, message)
+
+    @app.on_message(filters.command(["settings", f"settings@{BOT_USERNAME}"]))
+    async def current_settings(_, message):
+        try:
+            wm_text = watermark[0].split("text=")[-1].strip("'") if watermark else "None"
+            await message.reply_text(
+                f"⚙️ <b>Current Settings:</b>\n\n"
+                f"<code>Codec: {codec[0]}\n"
+                f"CRF: {crf[0]}\n"
+                f"Resolution: {resolution[0]}\n"
+                f"Preset: {preset[0]}\n"
+                f"Audio Bitrate: {audio_b[0]}\n"
+                f"Watermark: {wm_text}</code>"
+            )
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await current_settings(_, message)
+
+
+    @app.on_message(filters.command(["compress", f"compress@{BOT_USERNAME}"]) & filters.reply)
+    async def compress_command(_, message: Message):
+        try:
+            # Only accept replies to video or document
+            reply = message.reply_to_message
+            if not reply or not (reply.video or reply.document):
+                return await message.reply_text("❌ Please reply to a video or document to compress.")
+
+            await message.reply_text("⏳ Added to compression queue...")
+            data.append(reply)
+
+            # If it's the only item in queue, start processing
+            if len(data) == 1:
+                await add_task(reply)
+
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await compress_command(_, message)
+
+    @app.on_message(filters.command([Command.CANCEL, f"{Command.CANCEL}@{BOT_USERNAME}"]))
+    async def cancel_command(_, message):
+        try:
+            if not data:
+                return await message.reply_text("No active tasks to cancel.")
+            data.clear()
+            await message.reply_text("✅ Cancelled all pending tasks.")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await cancel_command(_, message)
+
+    @app.on_message(filters.command([Command.STATUS, f"{Command.STATUS}@{BOT_USERNAME}"]))
+    async def status_command(_, message):
+        try:
+            await message.reply_text(
+                f"📊 <b>Current Status:</b>\n\n"
+                f"<code>Queue size: {len(data)}\n"
+                f"Active workers: {len(data) if len(data) < MAX_WORKERS else MAX_WORKERS}/{MAX_WORKERS}</code>"
+            )
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await status_command(_, message)
+
+    @app.on_message(filters.command([Command.EXEC, f"{Command.EXEC}@{BOT_USERNAME}"]))
+    async def exec_command(_, message):
+        if not await is_admin(message):
+            return
+        
+        cmd = safe_extract_args(message.text)
+        if not cmd:
+            return await message.reply_text("Please provide a command to execute.")
+        
+        try:
+            process = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            output = f"<b>Output:</b>\n<code>{stdout.decode().strip()}</code>"
+            if stderr:
+                output += f"\n\n<b>Error:</b>\n<code>{stderr.decode().strip()}</code>"
+            await message.reply_text(output)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await exec_command(_, message)
+        except Exception as e:
+            await message.reply_text(f"Error: {str(e)}")
+
+    @app.on_message(filters.command([Command.UPLOAD_LOG_FILE, f"{Command.UPLOAD_LOG_FILE}@{BOT_USERNAME}"]))
+    async def log_command(_, message):
+        try:
+            if not os.path.exists("log.txt"):
+                return await message.reply_text("No log file found.")
+            await message.reply_document("log.txt", caption="📄 Bot log file")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            await log_command(_, message)
+
+    # ===================== CLIENT MANAGEMENT =====================
+
+    async def initialize_user_client():
+        global user_client
+        if USER_SESSION:
+            user_client = Client(
+                name="user_session",
+                session_string=USER_SESSION,
+                api_id=APP_ID,
+                api_hash=API_HASH,
+                in_memory=True,
+                sleep_threshold=30,
+                max_concurrent_transmissions=1
+            )
+            await user_client.start()
+            LOGGER.info("User Client started successfully")
+
+    async def main():
+        # Create download location if not exists
+        os.makedirs(DOWNLOAD_LOCATION, exist_ok=True)
+        
+        # Initialize user client if available
+        if USER_SESSION:
+            await initialize_user_client()
+        
+        # Start the bot with optimized settings
+        await app.start()
+        me = await app.get_me()
+        LOGGER.info(f"Bot started as @{me.username}")
+        
+        # Keep the bot running
+        while True:
+            await asyncio.sleep(3600)
+
     app.run()
