@@ -222,3 +222,4 @@ async def upload_log_file(client, message) -> None:
     except Exception as e:
         LOGGER.error(f"Log upload error: {str(e)}")
         await message.reply_text(f"⚠️ Failed to upload logs: {str(e)}")
+
