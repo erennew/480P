@@ -1,3 +1,4 @@
+# ffmpeg.py
 import logging
 import asyncio
 import os
@@ -32,11 +33,32 @@ LOGGER = logging.getLogger(__name__)
 
 async def safe_path(path):
     """Create a safe filesystem path by removing special characters"""
+    if not path:
+        return path
+        
+    # First, get the directory and filename separately
+    dir_name = os.path.dirname(path)
+    base_name = os.path.basename(path)
+    
     # Replace problematic characters with underscores
-    safe = re.sub(r'[\\/*?:"<>|@]', '_', path)
+    safe_base = re.sub(r'[\\/*?:"<>|@\']', '_', base_name)
     # Remove leading/trailing spaces and dots
-    safe = safe.strip('. ')
-    return safe
+    safe_base = safe_base.strip('. ')
+    
+    # Handle empty filename case
+    if not safe_base:
+        safe_base = f"file_{int(time.time())}"
+    
+    # Reconstruct path
+    safe_path = os.path.join(dir_name, safe_base) if dir_name else safe_base
+    
+    # Ensure the path isn't too long (Windows limit is 260 chars)
+    if len(safe_path) > 200:
+        name, ext = os.path.splitext(safe_base)
+        safe_base = f"{name[:150]}{ext}"
+        safe_path = os.path.join(dir_name, safe_base) if dir_name else safe_base
+    
+    return safe_path
 
 async def convert_video(video_file, output_directory, total_time, bot, message, chan_msg):
     """Handle video conversion with comprehensive error handling"""
@@ -46,10 +68,17 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
 
     try:
         # Create safe filenames
-        safe_video_file = await safe_path(video_file)
-        if video_file != safe_video_file:
-            os.rename(video_file, safe_video_file)
-            video_file = safe_video_file
+        original_video_file = video_file
+        video_file = await safe_path(video_file)
+        
+        # Rename if needed
+        if original_video_file != video_file:
+            try:
+                os.rename(original_video_file, video_file)
+                LOGGER.info(f"Renamed file from {original_video_file} to {video_file}")
+            except Exception as e:
+                LOGGER.error(f"Failed to rename file: {e}")
+                video_file = original_video_file
 
         # Validate input file
         if not os.path.exists(video_file):
@@ -66,7 +95,7 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
 
         # Prepare output filename
         base_name = await safe_path(os.path.basename(video_file))
-        file_name = os.path.splitext(base_name)[0]
+        file_name, file_ext = os.path.splitext(base_name)
         out_put_file_name = os.path.join(
             output_directory,
             f"{file_name}[Encoded].mkv"
@@ -77,16 +106,16 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
             try:
                 if os.path.exists(f):
                     os.remove(f)
-            except:
-                pass
+            except Exception as e:
+                LOGGER.warning(f"Couldn't remove existing file {f}: {e}")
 
-        # Build FFmpeg command
+        # Build FFmpeg command with proper escaping
         ffmpeg_command = [
             'ffmpeg',
             '-hide_banner',
             '-loglevel', 'error',
             '-progress', progress_file,
-            '-i', f'"{video_file}"',  # Properly quote the input file
+            '-i', video_file,  # No quotes here - we'll let subprocess handle it
             *shlex.split(watermark[0]),
             '-c:v', codec[0],
             '-map', '0',
@@ -99,15 +128,15 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
             '-b:a', audio_b[0],
             '-preset', preset[0],
             '-y',
-            f'"{out_put_file_name}"'  # Properly quote the output file
+            out_put_file_name  # No quotes here
         ]
 
-        LOGGER.info(f"Starting encoding: {' '.join(ffmpeg_command)}")
+        LOGGER.info(f"Starting encoding: {ffmpeg_command}")
         COMPRESSION_START_TIME = time.time()
 
         # Start FFmpeg process
-        process = await asyncio.create_subprocess_shell(
-            ' '.join(ffmpeg_command),
+        process = await asyncio.create_subprocess_exec(
+            *ffmpeg_command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -169,7 +198,8 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
                             ])
                         )
                     except Exception as e:
-                        LOGGER.warning(f"Progress update failed: {e}")
+                        if "MESSAGE_NOT_MODIFIED" not in str(e):
+                            LOGGER.warning(f"Progress update failed: {e}")
             except Exception as e:
                 LOGGER.error(f"Progress tracking error: {e}")
                 continue
@@ -199,16 +229,16 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
         try:
             if out_put_file_name and os.path.exists(out_put_file_name):
                 os.remove(out_put_file_name)
-        except:
-            pass
+        except Exception as e:
+            LOGGER.error(f"Failed to remove output file: {e}")
         raise
     finally:
         for f in [progress_file, status_file]:
             try:
                 if os.path.exists(f):
                     os.remove(f)
-            except:
-                pass
+            except Exception as e:
+                LOGGER.error(f"Failed to remove temp file {f}: {e}")
 
 # ... [keep the existing media_info and take_screen_shot functions] ...
 
