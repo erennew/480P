@@ -1,65 +1,3 @@
-# ffmpeg.py
-import logging
-import asyncio
-import os
-import time
-import re
-import json
-import subprocess
-import math
-import shlex
-import shutil
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from bot.helper_funcs.display_progress import TimeFormatter
-from bot.localisation import Localisation
-from bot import (
-    FINISHED_PROGRESS_STR,
-    UN_FINISHED_PROGRESS_STR,
-    DOWNLOAD_LOCATION,
-    crf,
-    resolution,
-    audio_b,
-    preset,
-    codec,
-    watermark,
-    pid_list
-)
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-LOGGER = logging.getLogger(__name__)
-
-async def safe_path(path):
-    """Create a safe filesystem path by removing special characters"""
-    if not path:
-        return path
-        
-    # First, get the directory and filename separately
-    dir_name = os.path.dirname(path)
-    base_name = os.path.basename(path)
-    
-    # Replace problematic characters with underscores
-    safe_base = re.sub(r'[\\/*?:"<>|@\']', '_', base_name)
-    # Remove leading/trailing spaces and dots
-    safe_base = safe_base.strip('. ')
-    
-    # Handle empty filename case
-    if not safe_base:
-        safe_base = f"file_{int(time.time())}"
-    
-    # Reconstruct path
-    safe_path = os.path.join(dir_name, safe_base) if dir_name else safe_base
-    
-    # Ensure the path isn't too long (Windows limit is 260 chars)
-    if len(safe_path) > 200:
-        name, ext = os.path.splitext(safe_base)
-        safe_base = f"{name[:150]}{ext}"
-        safe_path = os.path.join(dir_name, safe_base) if dir_name else safe_base
-    
-    return safe_path
-
 async def convert_video(video_file, output_directory, total_time, bot, message, chan_msg):
     """Handle video conversion with comprehensive error handling"""
     progress_file = os.path.join(output_directory, "progress.txt")
@@ -83,6 +21,10 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
         # Validate input file
         if not os.path.exists(video_file):
             raise FileNotFoundError(f"Input file not found: {video_file}")
+        
+        # Verify file is not empty
+        if os.path.getsize(video_file) == 0:
+            raise Exception("Input file is empty (0 bytes)")
 
         # Setup default encoding parameters
         if not crf: crf.append("28")
@@ -109,14 +51,13 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
             except Exception as e:
                 LOGGER.warning(f"Couldn't remove existing file {f}: {e}")
 
-        # Build FFmpeg command with proper escaping
+        # First try: Standard conversion
         ffmpeg_command = [
             'ffmpeg',
             '-hide_banner',
             '-loglevel', 'error',
             '-progress', progress_file,
-            '-i', video_file,  # No quotes here - we'll let subprocess handle it
-            *shlex.split(watermark[0]),
+            '-i', video_file,
             '-c:v', codec[0],
             '-map', '0',
             '-crf', crf[0],
@@ -128,101 +69,149 @@ async def convert_video(video_file, output_directory, total_time, bot, message, 
             '-b:a', audio_b[0],
             '-preset', preset[0],
             '-y',
-            out_put_file_name  # No quotes here
+            out_put_file_name
         ]
 
-        LOGGER.info(f"Starting encoding: {ffmpeg_command}")
+        # Second try: Fallback command without complex filters
+        fallback_command = [
+            'ffmpeg',
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-progress', progress_file,
+            '-i', video_file,
+            '-c:v', codec[0],
+            '-map', '0',
+            '-crf', crf[0],
+            '-c:s', 'copy',
+            '-pix_fmt', 'yuv420p10le',
+            '-s', resolution[0],
+            '-c:a', 'libopus',
+            '-b:a', audio_b[0],
+            '-preset', preset[0],
+            '-y',
+            out_put_file_name
+        ]
+
+        # Third try: Minimal conversion
+        minimal_command = [
+            'ffmpeg',
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-progress', progress_file,
+            '-i', video_file,
+            '-c:v', 'copy',
+            '-c:a', 'copy',
+            '-y',
+            out_put_file_name
+        ]
+
+        commands_to_try = [
+            (ffmpeg_command, "Standard command"),
+            (fallback_command, "Fallback command"),
+            (minimal_command, "Minimal command")
+        ]
+
+        last_error = None
         COMPRESSION_START_TIME = time.time()
 
-        # Start FFmpeg process
-        process = await asyncio.create_subprocess_exec(
-            *ffmpeg_command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        # Track process ID
-        pid_list.insert(0, process.pid)
-        with open(status_file, 'w') as f:
-            json.dump({
-                'pid': process.pid,
-                'message': message.id,
-                'running': True
-            }, f, indent=2)
-
-        # Progress tracking loop
-        while True:
-            await asyncio.sleep(3)
-            if process.returncode is not None:
-                break
-
+        for cmd, cmd_name in commands_to_try:
             try:
-                with open(progress_file, 'r') as file:
-                    text = file.read()
-                    frame = re.findall(r"frame=(\d+)", text)
-                    time_in_us = re.findall(r"out_time_ms=(\d+)", text)
-                    progress = re.findall(r"progress=(\w+)", text)
-                    speed = re.findall(r"speed=(\d+\.?\d*)", text)
+                LOGGER.info(f"Trying {cmd_name}: {' '.join(cmd)}")
+                
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
 
-                    frame = int(frame[-1]) if frame else 0
-                    speed = float(speed[-1]) if speed else 1.0
-                    time_in_us = int(time_in_us[-1]) if time_in_us else 0
+                pid_list.insert(0, process.pid)
+                with open(status_file, 'w') as f:
+                    json.dump({
+                        'pid': process.pid,
+                        'message': message.id,
+                        'running': True
+                    }, f, indent=2)
 
-                    if progress and progress[-1] == "end":
-                        LOGGER.info("Encoding completed")
+                # Progress tracking loop
+                while True:
+                    await asyncio.sleep(3)
+                    if process.returncode is not None:
                         break
 
-                    elapsed_time = time_in_us / 1000000
-                    remaining_time = math.floor((total_time - elapsed_time) / speed)
-                    percentage = math.floor(elapsed_time * 100 / total_time)
-
-                    progress_str = (
-                        "📈 <b>Progress:</b> {0}%\n[{1}{2}]".format(
-                            round(percentage, 2),
-                            ''.join([FINISHED_PROGRESS_STR for _ in range(math.floor(percentage / 10))]),
-                            ''.join([UN_FINISHED_PROGRESS_STR for _ in range(10 - math.floor(percentage / 10))])
-                        )
-                    )
-
-                    stats = (
-                        f'<blockquote>🗳 <b>Encoding in Progress</b>\n\n'
-                        f'⌚ <b>Time Left:</b> {TimeFormatter(remaining_time * 1000) if remaining_time > 0 else "-"}\n\n'
-                        f'{progress_str}\n</blockquote>'
-                    )
-
                     try:
-                        await message.edit_text(
-                            text=stats,
-                            reply_markup=InlineKeyboardMarkup([
-                                [InlineKeyboardButton('❌ Cancel ❌', callback_data='fuckingdo')]
-                            ])
-                        )
+                        with open(progress_file, 'r') as file:
+                            text = file.read()
+                            frame = re.findall(r"frame=(\d+)", text)
+                            time_in_us = re.findall(r"out_time_ms=(\d+)", text)
+                            progress = re.findall(r"progress=(\w+)", text)
+                            speed = re.findall(r"speed=(\d+\.?\d*)", text)
+
+                            frame = int(frame[-1]) if frame else 0
+                            speed = float(speed[-1]) if speed else 1.0
+                            time_in_us = int(time_in_us[-1]) if time_in_us else 0
+
+                            if progress and progress[-1] == "end":
+                                LOGGER.info("Encoding completed")
+                                break
+
+                            elapsed_time = time_in_us / 1000000
+                            remaining_time = math.floor((total_time - elapsed_time) / speed)
+                            percentage = math.floor(elapsed_time * 100 / total_time)
+
+                            progress_str = (
+                                "📈 <b>Progress:</b> {0}%\n[{1}{2}]".format(
+                                    round(percentage, 2),
+                                    ''.join([FINISHED_PROGRESS_STR for _ in range(math.floor(percentage / 10))]),
+                                    ''.join([UN_FINISHED_PROGRESS_STR for _ in range(10 - math.floor(percentage / 10))])
+                                )
+                            )
+
+                            stats = (
+                                f'<blockquote>🗳 <b>Encoding in Progress</b>\n\n'
+                                f'⌚ <b>Time Left:</b> {TimeFormatter(remaining_time * 1000) if remaining_time > 0 else "-"}\n\n'
+                                f'{progress_str}\n</blockquote>'
+                            )
+
+                            try:
+                                await message.edit_text(
+                                    text=stats,
+                                    reply_markup=InlineKeyboardMarkup([
+                                        [InlineKeyboardButton('❌ Cancel ❌', callback_data='fuckingdo')]
+                                    ])
+                                )
+                            except Exception as e:
+                                if "MESSAGE_NOT_MODIFIED" not in str(e):
+                                    LOGGER.warning(f"Progress update failed: {e}")
                     except Exception as e:
-                        if "MESSAGE_NOT_MODIFIED" not in str(e):
-                            LOGGER.warning(f"Progress update failed: {e}")
+                        LOGGER.error(f"Progress tracking error: {e}")
+                        continue
+
+                stdout, stderr = await process.communicate()
+                LOGGER.debug(f"FFmpeg stdout: {stdout.decode().strip()}")
+                LOGGER.debug(f"FFmpeg stderr: {stderr.decode().strip()}")
+
+                if process.pid in pid_list:
+                    pid_list.remove(process.pid)
+
+                # Verify output
+                if os.path.exists(out_put_file_name):
+                    if os.path.getsize(out_put_file_name) > 0:
+                        LOGGER.info(f"Encoding successful with {cmd_name}")
+                        return out_put_file_name
+                    else:
+                        os.remove(out_put_file_name)
+                        last_error = f"{cmd_name} produced empty output file"
+                        LOGGER.warning(last_error)
+                else:
+                    last_error = f"{cmd_name} failed to create output file\nFFmpeg error:\n{stderr.decode().strip()}"
+                    LOGGER.warning(last_error)
+
             except Exception as e:
-                LOGGER.error(f"Progress tracking error: {e}")
+                last_error = str(e)
+                LOGGER.warning(f"Command {cmd_name} failed: {e}")
                 continue
 
-        stdout, stderr = await process.communicate()
-        LOGGER.debug(f"FFmpeg stdout: {stdout.decode().strip()}")
-        LOGGER.debug(f"FFmpeg stderr: {stderr.decode().strip()}")
-
-        if process.pid in pid_list:
-            pid_list.remove(process.pid)
-
-        if not os.path.exists(out_put_file_name):
-            error_msg = stderr.decode().strip() or "No error message from FFmpeg"
-            if "No such file or directory" in error_msg:
-                error_msg += "\n\n⚠️ File path contains special characters that FFmpeg can't handle!"
-            raise Exception(f"Output file not created\n\nFFmpeg error:\n{error_msg}")
-
-        if os.path.getsize(out_put_file_name) == 0:
-            os.remove(out_put_file_name)
-            raise Exception("Output file is empty (0 bytes)")
-
-        LOGGER.info(f"Encoding successful: {out_put_file_name}")
-        return out_put_file_name
+        raise Exception(f"All conversion attempts failed. Last error: {last_error}")
 
     except Exception as e:
         LOGGER.error(f"Conversion failed: {str(e)}", exc_info=True)
