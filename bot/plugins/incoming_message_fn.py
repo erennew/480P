@@ -1,316 +1,264 @@
 import datetime
 import logging
+import os
+import time
+import asyncio
+import json
+import shutil
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+from bot.localisation import Localisation
+from bot import (
+    DOWNLOAD_LOCATION,
+    AUTH_USERS,
+    LOG_CHANNEL,
+    USER_SESSION,
+    APP_ID,
+    API_HASH,
+    data,
+    app
+)
+from bot.helper_funcs.ffmpeg import (
+    convert_video,
+    media_info,
+    take_screen_shot
+)
+from bot.helper_funcs.display_progress import (
+    progress_for_pyrogram,
+    TimeFormatter,
+    humanbytes
+)
+
+# Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 LOGGER = logging.getLogger(__name__)
-import os, time, asyncio, json
-from bot.localisation import Localisation
-from bot import (
-  DOWNLOAD_LOCATION, 
-  AUTH_USERS,
-  LOG_CHANNEL,
-  UPDATES_CHANNEL,
-  SESSION_NAME,
-  data,
-  app  
-)
-from bot.helper_funcs.ffmpeg import (
-  convert_video,
-  media_info,
-  take_screen_shot
-)
-from bot.helper_funcs.display_progress import (
-  progress_for_pyrogram,
-  TimeFormatter,
-  humanbytes
+
+# Initialize user client for large uploads
+user_client = Client(
+    name="user_session",
+    session_string=USER_SESSION,
+    api_id=APP_ID,
+    api_hash=API_HASH,
+    in_memory=True
 )
 
-from pyrogram import Client, filters
-from pyrogram.handlers import MessageHandler, CallbackQueryHandler
-from pyrogram.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors.exceptions.bad_request_400 import UserNotParticipant, UsernameNotOccupied, ChatAdminRequired, PeerIdInvalid
+# Download default thumbnail
+try:
+    if not os.path.exists("thumb.jpg"):
+        os.system("wget https://telegra.ph/file/0e369e097843b0dc4b771.jpg -O thumb.jpg")
+except Exception as e:
+    LOGGER.error(f"Failed to download thumbnail: {e}")
+    open("thumb.jpg", "wb").write(b"DEFAULT_THUMBNAIL_BYTES")
 
+async def cleanup_files(*files):
+    """Clean up multiple files safely"""
+    for file in files:
+        try:
+            if file and os.path.exists(file) and file not in ["thumb.jpg"]:
+                os.remove(file)
+        except Exception as e:
+            LOGGER.error(f"Failed to delete {file}: {e}")
 
-os.system("wget https://telegra.ph/file/0e369e097843b0dc4b771.jpg -O thumb.jpg")
+async def handle_failure(error_msg, sent_message=None, log_channel=None):
+    """Centralized error handling"""
+    LOGGER.error(error_msg)
+    try:
+        if sent_message:
+            await sent_message.edit_text(f"❌ Error: {error_msg[:1000]}")
+    except Exception as e:
+        LOGGER.error(f"Failed to send error message: {e}")
+    
+    if log_channel:
+        try:
+            await app.send_message(
+                chat_id=log_channel,
+                text=f"<blockquote>❌ Error:\n<code>{error_msg[:4000]}</code></blockquote>"
+            )
+        except Exception as e:
+            LOGGER.error(f"Failed to log error: {e}")
 
-CURRENT_PROCESSES = {}
-CHAT_FLOOD = {}
-broadcast_ids = {}
-bot = app        
 async def incoming_start_message_f(bot, update):
-    """/start command"""
-    
-    await bot.send_message(
-        chat_id=update.chat.id,
-        text=Localisation.START_TEXT,
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton('👨‍💻 Oᴡɴᴇʀ 👨‍💻', url='https://t.me/Krishna99887722')
-                ]
-            ]
-        ),
-        reply_to_message_id=update.id,
-    )
-    
+    """Handle /start command"""
+    try:
+        await bot.send_message(
+            chat_id=update.chat.id,
+            text=Localisation.START_TEXT,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton('👨‍💻 Owner 👨‍💻', url='https://t.me/Krishna99887722')]]
+            ),
+            reply_to_message_id=update.id,
+        )
+    except Exception as e:
+        LOGGER.error(f"Start command failed: {e}")
+
 async def incoming_compress_message_f(update):
-  """/compress command"""
+    """Handle complete compression workflow"""
+    d_start = time.time()
+    status_file = os.path.join(DOWNLOAD_LOCATION, "status.json")
+    video_file = compressed_file = thumb_file = None
     
-  isAuto = True
-    #saved_file_path = video #DOWNLOAD_LOCATION + "/" + filename
-    #LOGGER.info(saved_file_path)
-  d_start = time.time()
-  c_start = time.time()
-  u_start = time.time()
-  status = DOWNLOAD_LOCATION + "/status.json"
- # if not os.path.exists(status):
-  sent_message = await bot.send_message(
-  chat_id=update.chat.id,
-  text=Localisation.DOWNLOAD_START,
-  reply_to_message_id=update.id
-              )
-  chat_id = LOG_CHANNEL
-  utc_now = datetime.datetime.utcnow()
-  ist_now = utc_now + datetime.timedelta(minutes=30, hours=5)
-  ist = ist_now.strftime("%d/%m/%Y, %H:%M:%S")
-  bst_now = utc_now + datetime.timedelta(minutes=00, hours=6)
-  bst = bst_now.strftime("%d/%m/%Y, %H:%M:%S")
-  now = f"\n{ist} (GMT+05:30)`\n`{bst} (GMT+06:00)"
-  download_start = await bot.send_message(chat_id, f"<blockquote>**𝙱𝚘𝚝 𝙱𝚎𝚌𝚘𝚖𝚎 𝙱𝚞𝚜𝚢 𝙽𝚘𝚠...⛈**</blockquote>")
-  try:
-      d_start = time.time()
-      status = DOWNLOAD_LOCATION + "/status.json"
-      with open(status, 'w') as f:
-        statusMsg = {
-          'running': True,
-          'message': sent_message.id
-        }
-
-        json.dump(statusMsg, f, indent=2)
-      video = await bot.download_media(
-        message=update,  
-        progress=progress_for_pyrogram,
-        progress_args=(
-          bot,
-          Localisation.DOWNLOAD_START,
-          sent_message,
-          d_start
-        )
-      )
-      saved_file_path = video
-      LOGGER.info(saved_file_path)  
-      LOGGER.info(video)
-      if( video is None ):
-        try:
-          await sent_message.edit_text(
-            text="Dᴏᴡɴʟᴏᴀᴅ Sᴛᴏᴘᴘᴇᴅ 🛑"
-          )
-          chat_id = LOG_CHANNEL
-          utc_now = datetime.datetime.utcnow()
-          ist_now = utc_now + datetime.timedelta(minutes=30, hours=5)
-          ist = ist_now.strftime("%d/%m/%Y, %H:%M:%S")
-          bst_now = utc_now + datetime.timedelta(minutes=00, hours=6)
-          bst = bst_now.strftime("%d/%m/%Y, %H:%M:%S")
-          now = f"\n{ist} (GMT+05:30)`\n`{bst} (GMT+06:00)"
-          await bot.send_message(chat_id, f"<blockquote>**𝙵𝚒𝚕𝚎 𝙳𝚘𝚠𝚗𝚕𝚘𝚊𝚍 𝚂𝚝𝚘𝚙𝚙𝚎𝚍.\n...𝙱𝚘𝚝 𝚒𝚜 𝙵𝚛𝚎𝚎 𝙽𝚘𝚠...🍃**</blockquote>")
-          await download_start.delete()
-        except:
-          pass
-       # delete_downloads()
-        LOGGER.info("Dᴏᴡɴʟᴏᴀᴅ Sᴛᴏᴘᴘᴇᴅ 🛑")
-        return
-  except (ValueError) as e:
-      try:
-        await sent_message.edit_text(
-          text=str(e)
-        )
-      except:
-          pass
-      #delete_downloads()            
-  try:
-      await sent_message.edit_text(                
-        text=Localisation.SAVED_RECVD_DOC_FILE                
-      )
-  except:
-      pass     
-  
-  if os.path.exists(saved_file_path):
-    downloaded_time = TimeFormatter((time.time() - d_start)*1000)
-    duration, bitrate = await media_info(saved_file_path)
-    if duration is None or bitrate is None:
-      try:
-        await sent_message.edit_text(                
-          text="⚠️ Gᴇᴛᴛɪɴɢ Vɪᴅᴇᴏ Mᴇᴛᴀ Dᴀᴛᴀ Fᴀɪʟᴇᴅ ⚠️"                
-        )
-        chat_id = LOG_CHANNEL
-        utc_now = datetime.datetime.utcnow()
-        ist_now = utc_now + datetime.timedelta(minutes=30, hours=5)
-        ist = ist_now.strftime("%d/%m/%Y, %H:%M:%S")
-        bst_now = utc_now + datetime.timedelta(minutes=00, hours=6)
-        bst = bst_now.strftime("%d/%m/%Y, %H:%M:%S")
-        now = f"\n{ist} (GMT+05:30)`\n`{bst} (GMT+06:00)"
-        await bot.send_message(chat_id, f"<blockquote>**𝙵𝚒𝚕𝚎 𝙳𝚘𝚠𝚗𝚕𝚘𝚊𝚍 𝙵𝚊𝚒𝚕𝚎𝚍.\n...𝙱𝚘𝚝 𝚒𝚜 𝙵𝚛𝚎𝚎 𝙽𝚘𝚠...🍃**</blockquote>")
-        await download_start.delete()
-      except:
-          pass          
-     # delete_downloads()
-      return
-    thumb_image_path = await take_screen_shot(
-      saved_file_path,
-      os.path.dirname(os.path.abspath(saved_file_path)),
-      (duration / 2)
-    )
-    chat_id = LOG_CHANNEL
-    utc_now = datetime.datetime.utcnow()
-    ist_now = utc_now + datetime.timedelta(minutes=30, hours=5)
-    ist = ist_now.strftime("%d/%m/%Y, %H:%M:%S")
-    bst_now = utc_now + datetime.timedelta(minutes=00, hours=6)
-    bst = bst_now.strftime("%d/%m/%Y, %H:%M:%S")
-    now = f"\n{ist} (GMT+05:30)`\n`{bst} (GMT+06:00)"
-    await download_start.delete()
-    compress_start = await bot.send_message(chat_id, f"<blockquote>**𝙴𝚗𝚌𝚘𝚍𝚒𝚗𝚐 𝚅𝚒𝚍𝚎𝚘...⚙**</blockquote>")
-    await sent_message.edit_text(                    
-      text=Localisation.COMPRESS_START                    
-    )
-    c_start = time.time()
-    o = await convert_video(
-           video, 
-           DOWNLOAD_LOCATION, 
-           duration, 
-           bot, 
-           sent_message, 
-           compress_start
-         )
-    compressed_time = TimeFormatter((time.time() - c_start)*1000)
-    LOGGER.info(o)
-    if o == 'stopped':
-      return
-    if o is not None:
-      chat_id = LOG_CHANNEL
-      utc_now = datetime.datetime.utcnow()
-      ist_now = utc_now + datetime.timedelta(minutes=30, hours=5)
-      ist = ist_now.strftime("%d/%m/%Y, %H:%M:%S")
-      bst_now = utc_now + datetime.timedelta(minutes=00, hours=6)
-      bst = bst_now.strftime("%d/%m/%Y, %H:%M:%S")
-      now = f"\n{ist} (GMT+05:30)`\n`{bst} (GMT+06:00)"
-      await compress_start.delete()
-      upload_start = await bot.send_message(chat_id, f"<blockquote>**𝚄𝚙𝚕𝚘𝚊𝚍𝚒𝚗𝚐 𝚅𝚒𝚍𝚎𝚘 𝚘𝚗 𝚃𝙶...📥**</blockquote>")
-      await sent_message.edit_text(                    
-        text=Localisation.UPLOAD_START,                    
-      )
-      u_start = time.time()
-      caption = Localisation.COMPRESS_SUCCESS.replace('{}', downloaded_time, 1).replace('{}', compressed_time, 1)
-      upload = await bot.send_document(
-        chat_id=update.chat.id,
-        document=o,
-        caption=caption,
-        force_document=True,
-        #duration=duration,
-        thumb="thumb.jpg",
-        reply_to_message_id=update.id,
-        progress=progress_for_pyrogram,
-        progress_args=(
-          bot,
-          Localisation.UPLOAD_START,
-          sent_message,
-          u_start
-        )
-      )
-      if(upload is None):
-        try:
-          await sent_message.edit_text(
-            text="Uᴘʟᴏᴀᴅ Sᴛᴏᴘᴘᴇᴅ 🛑" 
-          )
-          chat_id = LOG_CHANNEL
-          utc_now = datetime.datetime.utcnow()
-          ist_now = utc_now + datetime.timedelta(minutes=30, hours=5)
-          ist = ist_now.strftime("%d/%m/%Y, %H:%M:%S")
-          bst_now = utc_now + datetime.timedelta(minutes=00, hours=6)
-          bst = bst_now.strftime("%d/%m/%Y, %H:%M:%S")
-          now = f"\n{ist} (GMT+05:30)`\n`{bst} (GMT+06:00)"
-          await bot.send_message(chat_id, f"<blockquote>**𝙵𝚒𝚕𝚎 𝚄𝚙𝚕𝚘𝚊𝚍 𝚜𝚝𝚘𝚙𝚙𝚎𝚍.\n...𝙱𝚘𝚝 𝚒𝚜 𝙵𝚛𝚎𝚎 𝙽𝚘𝚠...🍃**</blockquote>")
-          await upload_start.delete()
-        except:
-          pass
-       # delete_downloads()
-        return
-      uploaded_time = TimeFormatter((time.time() - u_start)*1000)
-      await sent_message.delete()
-   #   delete_downloads()
-      chat_id = LOG_CHANNEL
-      utc_now = datetime.datetime.utcnow()
-      ist_now = utc_now + datetime.timedelta(minutes=30, hours=5)
-      ist = ist_now.strftime("%d/%m/%Y, %H:%M:%S")
-      bst_now = utc_now + datetime.timedelta(minutes=00, hours=6)
-      bst = bst_now.strftime("%d/%m/%Y, %H:%M:%S")
-      now = f"\n{ist} (GMT+05:30)`\n`{bst} (GMT+06:00)"
-      await upload_start.delete()
-      await bot.send_message(chat_id, f"<blockquote>**𝙴𝙽𝙲𝙾𝙳𝙴𝙳 𝚄𝚙𝚕𝚘𝚊𝚍 𝙳𝚘𝚗𝚎.\n...𝙱𝚘𝚝 𝚒𝚜 𝙵𝚛𝚎𝚎 𝙽𝚘𝚠...🍃**</blockquote>")
-      LOGGER.info(upload.caption);
-      try:
-        await upload.edit_caption(
-          caption=upload.caption.replace('{}', uploaded_time)
-        )
-      except:
-        pass
-    else:
-     # delete_downloads()
-      try:
-        await sent_message.edit_text(                    
-          text="⚠️ Cᴏᴍᴘʀᴇꜱꜱɪᴏɴ Fᴀɪʟᴇᴅ ⚠️"               
-        )
-        chat_id = LOG_CHANNEL
-        now = datetime.datetime.now()
-        await bot.send_message(chat_id, f"<blockquote>**𝚅𝚒𝚍𝚎𝚘 𝙲𝚘𝚖𝚙𝚛𝚎𝚜𝚜𝚒𝚘𝚗 𝚏𝚊𝚒𝚕𝚎𝚍.\n...𝙱𝚘𝚝 𝚒𝚜 𝙵𝚛𝚎𝚎 𝙽𝚘𝚠...🍃</blockquote>")
-        await download_start.delete()
-      except:
-        pass
-      
-  else:
-  #  delete_downloads()
     try:
-      await sent_message.edit_text(                    
-        text="⚠️ Fᴀɪʟᴇᴅ Dᴏᴡɴʟᴏᴀᴅᴇᴅ Pᴀᴛʜ ɴᴏᴛ Exɪꜱᴛ ⚠️"               
-      )
-      chat_id = LOG_CHANNEL
-      utc_now = datetime.datetime.utcnow()
-      ist_now = utc_now + datetime.timedelta(minutes=30, hours=5)
-      ist = ist_now.strftime("%d/%m/%Y, %H:%M:%S")
-      bst_now = utc_now + datetime.timedelta(minutes=00, hours=6)
-      bst = bst_now.strftime("%d/%m/%Y, %H:%M:%S")
-      now = f"\n{ist} (GMT+05:30)`\n`{bst} (GMT+06:00)"
-      await bot.send_message(chat_id, f"<blockquote>**𝙵𝚒𝚕𝚎 𝙳𝚘𝚠𝚗𝚕𝚘𝚊𝚍𝚎𝚍 𝙴𝚛𝚛𝚘𝚛!\n...𝙱𝚘𝚝 𝚒𝚜 𝙵𝚛𝚎𝚎 𝙽𝚘𝚠...🍃**</blockquote>")
-      await download_start.delete()
-    except:
-      pass
-    
+        # Initialize status and send start message
+        sent_message = await app.send_message(
+            chat_id=update.chat.id,
+            text=Localisation.DOWNLOAD_START,
+            reply_to_message_id=update.id
+        )
+
+        with open(status_file, 'w') as f:
+            json.dump({'running': True, 'message': sent_message.id}, f)
+
+        # Download the video file
+        try:
+            video_file = await app.download_media(
+                message=update,
+                progress=progress_for_pyrogram,
+                progress_args=(app, Localisation.DOWNLOAD_START, sent_message, d_start)
+            )
+            
+            if not video_file or not os.path.exists(video_file):
+                await handle_failure("Download failed - file not saved", sent_message, LOG_CHANNEL)
+                return
+        except Exception as e:
+            await handle_failure(f"Download failed: {str(e)}", sent_message, LOG_CHANNEL)
+            return
+
+        # Get media info
+        try:
+            duration, bitrate = await media_info(video_file)
+            if not duration:
+                await handle_failure("Could not get video duration", sent_message, LOG_CHANNEL)
+                return
+        except Exception as e:
+            await handle_failure(f"Media info error: {str(e)}", sent_message, LOG_CHANNEL)
+            return
+
+        # Create thumbnail
+        try:
+            thumb_file = await take_screen_shot(
+                video_file,
+                os.path.dirname(video_file),
+                duration / 2
+            )
+            if not thumb_file or not os.path.exists(thumb_file):
+                thumb_file = "thumb.jpg"
+        except Exception as e:
+            LOGGER.error(f"Thumbnail error: {e}")
+            thumb_file = "thumb.jpg"
+
+        # Compress video
+        try:
+            compressed_file = await convert_video(
+                video_file,
+                DOWNLOAD_LOCATION,
+                duration,
+                app,
+                sent_message,
+                None
+            )
+            
+            if not compressed_file:
+                await handle_failure("Compression failed - no output file", sent_message, LOG_CHANNEL)
+                return
+                
+            if os.path.getsize(compressed_file) == 0:
+                await handle_failure("Compression failed - empty output file", sent_message, LOG_CHANNEL)
+                return
+        except Exception as e:
+            await handle_failure(f"Compression error: {str(e)}", sent_message, LOG_CHANNEL)
+            return
+
+        # Upload the file
+        try:
+            file_size = os.path.getsize(compressed_file)
+            use_user_client = file_size > 2 * 1024 * 1024 * 1024  # 2GB threshold
+            upload_client = user_client if use_user_client else app
+
+            await sent_message.edit_text(Localisation.UPLOAD_START)
+            u_start = time.time()
+
+            caption = Localisation.COMPRESS_SUCCESS.replace(
+                '{}', TimeFormatter((time.time() - d_start)*1000), 1
+            ).replace(
+                '{}', TimeFormatter((time.time() - time.time())*1000), 1
+            )
+
+            upload = await upload_client.send_document(
+                chat_id=update.chat.id,
+                document=compressed_file,
+                caption=caption,
+                force_document=True,
+                thumb=thumb_file,
+                reply_to_message_id=update.id,
+                progress=progress_for_pyrogram,
+                progress_args=(upload_client, Localisation.UPLOAD_START, sent_message, u_start)
+            )
+
+            if not upload:
+                await handle_failure("Upload failed - no response", sent_message, LOG_CHANNEL)
+                return
+
+            # Final success message
+            uploaded_time = TimeFormatter((time.time() - u_start)*1000)
+            try:
+                await upload.edit_caption(
+                    caption=upload.caption.replace('{}', uploaded_time)
+                )
+            except Exception as e:
+                LOGGER.error(f"Failed to update caption: {e}")
+
+            await sent_message.delete()
+            await app.send_message(
+                LOG_CHANNEL,
+                f"<blockquote>✅ Task completed successfully!\n"
+                f"Size: {humanbytes(file_size)}\n"
+                f"Time: {TimeFormatter((time.time() - d_start)*1000)}</blockquote>"
+            )
+
+        except Exception as e:
+            await handle_failure(f"Upload error: {str(e)}", sent_message, LOG_CHANNEL)
+            return
+
+    except Exception as e:
+        await handle_failure(f"Unexpected error: {str(e)}", None, LOG_CHANNEL)
+    finally:
+        await cleanup_files(video_file, compressed_file)
+        try:
+            if thumb_file and thumb_file != "thumb.jpg":
+                await cleanup_files(thumb_file)
+            if os.path.exists(status_file):
+                os.remove(status_file)
+        except Exception as e:
+            LOGGER.error(f"Cleanup error: {e}")
+
 async def incoming_cancel_message_f(bot, update):
-  """/cancel command"""
-  #if update.from_user.id != 1391975600 or 888605132 or 1760568371:
-  if update.from_user.id not in AUTH_USERS:      
-        
-    try:
-      await update.message.delete()
-    except:
-      pass
-    return
+    """Handle /cancel command"""
+    if update.from_user.id not in AUTH_USERS:
+        try:
+            await update.message.delete()
+        except Exception as e:
+            LOGGER.error(f"Failed to delete message: {e}")
+        return
 
-  status = DOWNLOAD_LOCATION + "/status.json"
-  if os.path.exists(status):
-    inline_keyboard = []
-    ikeyboard = []
-    ikeyboard.append(InlineKeyboardButton("Yᴇꜱ 🚫", callback_data=("fuckingdo").encode("UTF-8")))
-    ikeyboard.append(InlineKeyboardButton("Nᴏ 🤗", callback_data=("fuckoff").encode("UTF-8")))
-    inline_keyboard.append(ikeyboard)
-    reply_markup = InlineKeyboardMarkup(inline_keyboard)
-    await update.reply_text("Aʀᴇ Yᴏᴜ Sᴜʀᴇ? 🚫 Tʜɪꜱ ᴡɪʟʟ Sᴛᴏᴘ ᴛʜᴇ Cᴏᴍᴘʀᴇꜱꜱɪᴏɴ!", reply_markup=reply_markup, quote=True)
-  else:
-   # delete_downloads()
-    await bot.send_message(
-      chat_id=update.chat.id,
-      text="<blockquote>No active compression exists</blockquote>",
-      reply_to_message_id=update.id
-    )
+    status_file = os.path.join(DOWNLOAD_LOCATION, "status.json")
+    if os.path.exists(status_file):
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Yes 🚫", callback_data="fuckingdo"),
+            InlineKeyboardButton("No 🤗", callback_data="fuckoff")
+        ]])
+        await update.reply_text(
+            "Are you sure? This will stop the compression!",
+            reply_markup=reply_markup,
+            quote=True
+        )
+    else:
+        await bot.send_message(
+            chat_id=update.chat.id,
+            text="No active compression exists",
+            reply_to_message_id=update.id
+        )
