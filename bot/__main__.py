@@ -31,11 +31,12 @@ pyrogram.utils.MIN_CHAT_ID = -999999999999
 pyrogram.utils.MIN_CHANNEL_ID = -100999999999999
 
 # Default settings
-crf.append("23")
-codec.append("libx265")
-resolution.append("1280x720")
-preset.append("medium")
-audio_b.append("96k")
+crf.append("23")                # Balanced CRF for 480p and medium preset
+codec.append("libx265")         # Efficient and modern codec
+resolution.append("854x480")    # Standard 480p resolution (16:9)
+preset.append("fast")         # Medium = balanced speed vs quality
+audio_b.append("64k")           # Lower audio bitrate to save size
+
 
 uptime = dt.now()
 user_client = None
