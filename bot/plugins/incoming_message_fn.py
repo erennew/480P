@@ -1,3 +1,4 @@
+# incoming_message.py
 import datetime
 import logging
 import os
@@ -39,13 +40,18 @@ logging.getLogger("pyrogram").setLevel(logging.WARNING)
 LOGGER = logging.getLogger(__name__)
 
 # Initialize user client for large uploads
-user_client = Client(
-    name="user_session",
-    session_string=USER_SESSION,
-    api_id=APP_ID,
-    api_hash=API_HASH,
-    in_memory=True
-)
+user_client = None
+if USER_SESSION:
+    try:
+        user_client = Client(
+            name="user_session",
+            session_string=USER_SESSION,
+            api_id=APP_ID,
+            api_hash=API_HASH,
+            in_memory=True
+        )
+    except Exception as e:
+        LOGGER.error(f"Failed to initialize user client: {e}")
 
 # Download default thumbnail
 try:
@@ -60,7 +66,10 @@ async def cleanup_files(*files):
     for file in files:
         try:
             if file and os.path.exists(file) and file not in ["thumb.jpg"]:
-                os.remove(file)
+                if os.path.isdir(file):
+                    shutil.rmtree(file)
+                else:
+                    os.remove(file)
         except Exception as e:
             LOGGER.error(f"Failed to delete {file}: {e}")
 
@@ -113,6 +122,9 @@ async def incoming_compress_message_f(update):
         with open(status_file, 'w') as f:
             json.dump({'running': True, 'message': sent_message.id}, f)
 
+        # Create download directory if it doesn't exist
+        os.makedirs(DOWNLOAD_LOCATION, exist_ok=True)
+
         # Download the video file
         try:
             video_file = await app.download_media(
@@ -124,6 +136,8 @@ async def incoming_compress_message_f(update):
             if not video_file or not os.path.exists(video_file):
                 await handle_failure("Download failed - file not saved", sent_message, LOG_CHANNEL)
                 return
+                
+            LOGGER.info(f"Downloaded file to: {video_file}")
         except Exception as e:
             await handle_failure(f"Download failed: {str(e)}", sent_message, LOG_CHANNEL)
             return
@@ -134,6 +148,8 @@ async def incoming_compress_message_f(update):
             if not duration:
                 await handle_failure("Could not get video duration", sent_message, LOG_CHANNEL)
                 return
+                
+            LOGGER.info(f"Media info - Duration: {duration}, Bitrate: {bitrate}")
         except Exception as e:
             await handle_failure(f"Media info error: {str(e)}", sent_message, LOG_CHANNEL)
             return
@@ -147,6 +163,9 @@ async def incoming_compress_message_f(update):
             )
             if not thumb_file or not os.path.exists(thumb_file):
                 thumb_file = "thumb.jpg"
+                LOGGER.warning("Using default thumbnail")
+            else:
+                LOGGER.info(f"Created thumbnail: {thumb_file}")
         except Exception as e:
             LOGGER.error(f"Thumbnail error: {e}")
             thumb_file = "thumb.jpg"
@@ -162,13 +181,15 @@ async def incoming_compress_message_f(update):
                 None
             )
             
-            if not compressed_file:
+            if not compressed_file or not os.path.exists(compressed_file):
                 await handle_failure("Compression failed - no output file", sent_message, LOG_CHANNEL)
                 return
                 
             if os.path.getsize(compressed_file) == 0:
                 await handle_failure("Compression failed - empty output file", sent_message, LOG_CHANNEL)
                 return
+                
+            LOGGER.info(f"Successfully compressed file: {compressed_file}")
         except Exception as e:
             await handle_failure(f"Compression error: {str(e)}", sent_message, LOG_CHANNEL)
             return
@@ -177,7 +198,7 @@ async def incoming_compress_message_f(update):
         try:
             file_size = os.path.getsize(compressed_file)
             use_user_client = file_size > 2 * 1024 * 1024 * 1024  # 2GB threshold
-            upload_client = user_client if use_user_client else app
+            upload_client = user_client if (use_user_client and user_client) else app
 
             await sent_message.edit_text(Localisation.UPLOAD_START)
             u_start = time.time()
@@ -187,6 +208,11 @@ async def incoming_compress_message_f(update):
             ).replace(
                 '{}', TimeFormatter((time.time() - time.time())*1000), 1
             )
+
+            # Start the user client if needed
+            if upload_client == user_client and not user_client.is_connected:
+                await user_client.start()
+                LOGGER.info("Started user client for large upload")
 
             upload = await upload_client.send_document(
                 chat_id=update.chat.id,
@@ -210,7 +236,8 @@ async def incoming_compress_message_f(update):
                     caption=upload.caption.replace('{}', uploaded_time)
                 )
             except Exception as e:
-                LOGGER.error(f"Failed to update caption: {e}")
+                if "MESSAGE_NOT_MODIFIED" not in str(e):
+                    LOGGER.error(f"Failed to update caption: {e}")
 
             await sent_message.delete()
             await app.send_message(
@@ -235,6 +262,9 @@ async def incoming_compress_message_f(update):
                 os.remove(status_file)
         except Exception as e:
             LOGGER.error(f"Cleanup error: {e}")
+        finally:
+            if user_client and user_client.is_connected:
+                await user_client.stop()
 
 async def incoming_cancel_message_f(bot, update):
     """Handle /cancel command"""
